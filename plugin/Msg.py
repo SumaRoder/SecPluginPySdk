@@ -1,9 +1,11 @@
+from enum import Enum
+
 """
 消息类型集合。
 
 定义了所有支持的消息类型常量。
 """
-class Msg:
+class Msg(Enum):
     """消息类型集合。
 
     包含所有支持的消息类型常量。
