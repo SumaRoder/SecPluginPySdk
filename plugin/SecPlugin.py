@@ -1,10 +1,19 @@
+import os 
+libs = ['websockets']
+url = r'https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/'
+try:
+    import websockets
+except ModuleNotFoundError:
+	for lib in libs:
+		print(f"Start install {lib}.")
+		os.system(f"pip install {lib} -i {url}")
+		print(f"{lib} install successful.")
+
 from typing import Union
 import websockets
 import asyncio
 import threading
 import traceback
-from time import sleep
-from datetime import datetime
 from json import dumps, loads
 import queue
 import logging
@@ -431,9 +440,6 @@ class SecPlugin:
             if p.is_alive():
                 p.terminate()
         self.running = False
-        if self.ws is not None:
-            asyncio.run(self.ws.close())
-            self.ws = None
 
 def start_websocket(plugin):
     """
@@ -478,9 +484,9 @@ def run(plugin):
         while plugin.running:
             pass
     except KeyboardInterrupt:
-        plugin.running = False
         plugin.onClose()
-        print("\n正在关闭...等待线程退出")
+        plugin.log("")
+        plugin.log("正在关闭...等待线程退出")
         ws_thread.join(timeout=1)
         send_thread.join(timeout=1)
-        print("程序终止")
+        plugin.log("程序终止")
