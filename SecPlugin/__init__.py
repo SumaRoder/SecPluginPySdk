@@ -11,9 +11,11 @@ async def test(msg, match):
 plugin.start(webui=True)
 """
 
-__version__ = "1.0"
+__version__ = "1.1"
 __author__ = "SumaRoder"
-__all__ = ["Plugin", "Messenger"]
+__all__ = ["Plugin", "Cmd", "Msg", "Messenger"]
 
 from .plugin import Plugin
+from .cmd import Cmd
+from .msg import Msg
 from .messenger import Messenger

@@ -118,21 +118,13 @@ class Plugin:
                 await self.ws.close()
                 self.log("关闭连接", tag="onDisconnectWebSocket")
 
-    def start(self,
-              use_webui=False) -> None:
+    def start(self) -> None:
         try:
             self.running = True
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             task = loop.create_task(self._run())
-
-            if use_webui:
-                from .webui import WebUI
-                web_app = WebUI(self)
-                frontend_task = threading.Thread(target=web_app.start)
-                frontend_task.daemon = True
-                frontend_task.start()
 
             try:
                 loop.run_until_complete(task)

@@ -16,4 +16,4 @@ async def test_async(messenger: 'Messenger', matches):
     plugin.log("消息接收", tag="onTestAsync")
     plugin.sendMsg(messenger, "成功")
 
-plugin.start(use_webui=True)
+plugin.start()
