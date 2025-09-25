@@ -1,4 +1,3 @@
-from __future__ import annotations
 import json
 import logging
 import re
@@ -28,8 +27,7 @@ class Sender:
                  .add(Msg.Nick, nick)
             await self._plugin.send_ws_msg(Cmd.SendOicqMsg, reply, rsp=False)
         except Exception as e:
-            self._plugin.log(e, tag="onSendJson", level=logging.ERROR)
-        return None
+            self._plugin._logger.error(e, tag="set_group_member_nick")
 
     async def withdraw(self, messenger_or_qun: Union['Messenger', str], msgId: str, account: str = None) -> Any:
         if not self._plugin.running():
@@ -45,7 +43,7 @@ class Sender:
             reply.add(Msg.Withdraw, msgId)
             await self._plugin.send_ws_msg(Cmd.SendOicqMsg, reply, rsp=False)
         except Exception as e:
-            self._plugin.log(e, tag="onSendJson", level=logging.ERROR)
+            self._plugin._logger.error(e, tag="withdraw")
         return None
 
     async def send_json_card(self, messenger: 'Messenger', type: str, *args) -> Any:
@@ -62,7 +60,7 @@ class Sender:
                         reply.add(arguments[i], args[i])
             return await self._plugin.send_ws_msg(Cmd.SendOicqMsg, reply)
         except Exception as e:
-            self._plugin.log(e, tag="onSendMsg", level=logging.ERROR)
+            self._plugin._logger.error(e, tag="send_json_card")
         return None
 
     async def is_operator(self, messenger_or_qun: Union['Messenger', str], uin: str = None, account: str = None) -> bool:
@@ -87,7 +85,7 @@ class Sender:
                 if operator.get(Msg.Uin, "") == uin:
                     return True
         except Exception as e:
-            self._plugin.log(e, tag="getIsOperator", level=logging.ERROR)
+            self._plugin._logger.error(e, tag="is_operator")
         return False
 
     async def get_group_list(self, account: str = None) -> bool:
@@ -100,7 +98,7 @@ class Sender:
             groupList = await self._plugin.send_ws_msg(Cmd.SendOicqMsg, reply, rsp=True)
             return groupList
         except Exception as e:
-            self._plugin.log(e, tag="getGroupList", level=logging.ERROR)
+            self._plugin._logger.error(e, tag="get_group_list")
 
     async def send_msg(self, messenger: 'Messenger', *text: str, replyMsgId: int = 0) -> Any:
         if not self._plugin.running():
@@ -141,8 +139,7 @@ class Sender:
                 reply.add(Msg.Reply, replyMsgId)
             return await self._plugin.send_ws_msg(Cmd.SendOicqMsg, reply)
         except Exception as e:
-            self._plugin.log(e, tag="onSendMsg", level=logging.ERROR)
-        return None
+            self._plugin._logger.error(e, tag="send_msg")
 
     async def send_reply_msg(self, messenger: 'Messenger', *text: str, replyMsgId: int = 0) -> Any:
         if not self._plugin.running():
@@ -152,22 +149,17 @@ class Sender:
                 replyMsgId = messenger.get(Msg.MsgId)
             return self.send_msg(messenger, *text, replyMsgId=replyMsgId)
         except Exception as e:
-            self._plugin.log(e, tag="onSendMsg", level=logging.ERROR)
-        return None
+            self._plugin._logger.error(e, tag="send_reply_msg")
 
     async def send_card(self, messenger: 'Messenger', *json_text: str) -> List[Any]:
         if not self._plugin.running():
-            return []
+            return
         try:
-            results = []
-            for jsont in json_text:
-                reply = Messenger.get_base_messenger(messenger) \
+            reply = Messenger.get_base_messenger(messenger) \
                                 .add(Msg.Json, jsont)
-                results.append(await self._plugin.send_ws_msg(Cmd.SendOicqMsg, reply))
-            return results
+            return await self._plugin.send_ws_msg(Cmd.SendOicqMsg, reply)
         except Exception as e:
-            self._plugin.log(e, tag="onSendJson", level=logging.ERROR)
-        return []
+            self._plugin._logger.error(e, tag="send_card")
 
     async def send_img(self, messenger: 'Messenger', *url: str) -> Any:
         if not self._plugin.running():
@@ -178,5 +170,4 @@ class Sender:
                                 .add(Msg.Img, u)
             return await self._plugin.send_ws_msg(Cmd.SendOicqMsg, reply)
         except Exception as e:
-            self._plugin.log(e, tag="onSendImg", level=logging.ERROR)
-        return None
+            self._plugin._logger.error(e, tag="send_img", level=logging.ERROR)

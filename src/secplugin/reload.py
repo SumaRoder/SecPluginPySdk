@@ -59,7 +59,7 @@ class HotReload:
         if HotReload._task is not None and not HotReload._task.done():
             return
 
-        root = (root or Path.cwd()).resolve()
+        root = (root or Path(os.getcwd())).resolve()
 
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 

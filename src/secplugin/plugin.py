@@ -64,7 +64,8 @@ class Plugin:
                     await self.on_create(websocket)
                     msg_task = asyncio.create_task(self.on_msg_handler(websocket))
                     await self.ready(websocket)
-                    await msg_task
+                    while True:
+                        await asyncio.sleep(1)
             except Exception as e:
                 retry_cnt += 1
                 wait = min(2 ** retry_cnt + random.random(), 60)
@@ -145,23 +146,21 @@ class Plugin:
         
         await self._ws.send(json.dumps(payload))
         
-        if not rsp:
-            return None
-        
-        future = asyncio.get_event_loop().create_future()
-        self._pending_responses[seq] = future
-        
-        try:
-            response = await asyncio.wait_for(future, timeout=timeout)
-            return response
-        except asyncio.TimeoutError:
-            self._pending_responses.pop(seq, None)
-            raise TimeoutError(f"Response timeout for seq={seq}")
-        except asyncio.CancelledError:
-            self._pending_responses.pop(seq, None)
-            raise
-        finally:
-            self._pending_responses.pop(seq, None)
+        if rsp:
+            future = asyncio.get_event_loop().create_future()
+            self._pending_responses[seq] = future
+            
+            try:
+                response = await asyncio.wait_for(future, timeout=timeout)
+                return response
+            except asyncio.TimeoutError:
+                self._pending_responses.pop(seq, None)
+                raise TimeoutError(f"Response timeout for seq={seq}")
+            except asyncio.CancelledError:
+                self._pending_responses.pop(seq, None)
+                raise
+            finally:
+                self._pending_responses.pop(seq, None)
     
     async def on_unsupported_msg_handler(self, message: str):
         pass
@@ -197,15 +196,9 @@ class Plugin:
     
     async def on_resp_msg_handler(self, message):
         seq = message.get("seq")
-        if seq is None:
-            self._logger.warning(f"收到无 seq 响应: {message}", tag="resp")
-            return
-    
         future = self._pending_responses.get(seq)
         if future is None:
-            self._logger.warning(f"收到未知 seq 响应: {seq}, msg={message}", tag="resp")
             return
-    
         if not future.done():
             future.set_result(message)
         else:
@@ -219,21 +212,17 @@ class Plugin:
                 if matches:
                     if asyncio.iscoroutinefunction(handler):
                         if rn == 1:
-                            result = await handler(messenger)
+                            asyncio.create_task(handler(messenger))
                         elif rn == 2:
-                            result = await handler(messenger, matches)
-                        if result:
-                            self._logger.info(result, tag=handler.__name__)
+                            asyncio.create_task(handler(messenger, matches))
                     else:
                         if not self._allow_thread:
                             raise RuntimeError("Sync function was not allowed (allow_thread=False)")
                         loop = asyncio.get_running_loop()
                         if rn == 1:
-                            result = await loop.run_in_executor(self._executor, handler, messenger)
+                            await loop.run_in_executor(self._executor, handler, messenger)
                         elif rn == 2:
-                            result = await loop.run_in_executor(self._executor, handler, messenger, matches)
-                        if result:
-                            self._logger.info(result, tag=handler.__name__)
+                            await loop.run_in_executor(self._executor, handler, messenger, matches)
     
     def run(self,
             url: str | None = None,

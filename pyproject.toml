@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "secplugin"
 description = "WebSocket Plugin Demo for Secluded."
-version = "1.2.1"
+version = "1.2.2"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -25,10 +25,10 @@ dev = [
     "ruff",
 ]
 
-# [project.urls]
-# Homepage = "https://github.com/SumaRoder/SecPlugin"
-# Repository = "https://github.com/SumaRoder/SecPlugin"
-# Issues = "https://github.com/SumaRoder/SecPlugin/issues"
+[project.urls]
+Homepage = "https://github.com/SumaRoder/SecPlugin"
+Repository = "https://github.com/SumaRoder/SecPlugin"
+Issues = "https://github.com/SumaRoder/SecPlugin/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
