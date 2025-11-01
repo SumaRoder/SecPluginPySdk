@@ -2,20 +2,18 @@ import asyncio
 import os
 import signal
 import sys
-import time
 from pathlib import Path
-from typing import Dict, Optional
-import aiofiles
+from typing import Optional
 from .logger import Logger
 from concurrent.futures import ThreadPoolExecutor
 
-_executor = ThreadPoolExecutor()
+_executor: ThreadPoolExecutor = ThreadPoolExecutor()
 
 def _iter_py_files(root: Path):
     for p in root.rglob("*.py"):
         yield p.resolve()
 
-async def _mtimes(root: Path) -> Dict[Path, float]:
+async def _mtimes(root: Path) -> dict[Path, float]:
     mt = {}
     for file in _iter_py_files(root):
         try:
@@ -27,7 +25,7 @@ async def _mtimes(root: Path) -> Dict[Path, float]:
             continue
     return mt
 
-def _has_changed(old: Dict[Path, float], new: Dict[Path, float]) -> bool:
+def _has_changed(old: dict[Path, float], new: dict[Path, float]) -> bool:
     if len(old) != len(new):
         return True
     return any(old[f] != new[f] for f in new)
@@ -38,7 +36,7 @@ def _reexec():
     sys.stderr.flush()
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
-async def _watcher(logger, root: Path, interval: float = 0.8):
+async def _watcher(root: Path, interval: float = 0.8):
     old = await _mtimes(root)
     while True:
         await asyncio.sleep(interval)
@@ -55,7 +53,7 @@ class HotReload:
     _task: Optional[asyncio.Task] = None
 
     @staticmethod
-    def enable(logger, root: Optional[Path] = None, interval: float = 0.8) -> None:
+    def enable(root: Optional[Path] = None, interval: float = 0.8) -> None:
         if HotReload._task is not None and not HotReload._task.done():
             return
 
@@ -65,7 +63,7 @@ class HotReload:
 
         loop = asyncio.get_running_loop()
         HotReload._task = loop.create_task(
-            _watcher(logger, root, interval), name="hot-reload-watcher"
+            _watcher(root, interval), name="hot-reload-watcher"
         )
     
     @staticmethod

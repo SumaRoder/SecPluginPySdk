@@ -1,12 +1,23 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
 import asyncio
-import websockets
+from typing import Any, Callable, Optional, TYPE_CHECKING
+try:
+    import websockets # type: ignore
+except ImportError:
+    raise ImportError("Missing dependency 'websockets'. Please install it via 'pip install websockets'.")
+
+if TYPE_CHECKING:
+    try:
+        # websockets>=10
+        from websockets.legacy.client import WebSocketClientProtocol  # type: ignore
+    except Exception:
+        # older versions
+        from websockets.client import WebSocketClientProtocol  # type: ignore
+
 import re
 import inspect
 import random
-import time
-import threading
-from queue import Queue
 
 from .cmd import Cmd
 from .messenger import Messenger
@@ -17,39 +28,46 @@ from .sender import Sender
 
 class Plugin:
     def __init__(self,
-                 url: str | None = None,
-                 pid: str | None = None,
-                 name: str | None = None,
-                 token: str | None = None,
+                 url: str = "ws://127.0.0.1:24804",
+                 pid: str = "com.sumaroder.plugin",
+                 name: str = "SecPlugin",
+                 token: str = "SecretToken",
                  *,
                  max_workers: int = 4,
                  allow_thread: bool = False,
                  reload: bool = True,
-                 max_retry: int = 5) -> None:
-        self._ws_url: str | None = url
-        self._reload = reload
-        self._max_retry = max_retry
-        self._allow_thread = allow_thread
-        self._max_workers = max_workers
+                 max_retry: int = 5,
+                 log_path: Optional[str] = "app.log"
+    ) -> None:
+        self._reload: bool = reload
+        self._max_retry: int = max_retry
+        self._allow_thread: bool = allow_thread
+        self._max_workers: int = max_workers
+
+        self._ws_url: str = url
+        self._plugin_pid: str = pid
+        self._plugin_name: str = name
+        self._plugin_token: str = token
         
-        self._plugin_pid = pid
-        self._plugin_name = name
-        self._plugin_token = token
-        
-        self._running = False
-        self._ws = None
-        self._seq = 0
+        self._running: bool = False
+        self._ws: Optional[WebSocketClientProtocol] = None
+        self._seq: int = 0
         self._pending_responses: dict[int, asyncio.Future] = {}
-        self._executor: ThreadPoolExecutor | None = None
-        self._semaphore: asyncio.Semaphore | None = None
-        self._logger: Logger | None = None
-        self._sender: Sender | None = None
-        self._on_msg_regex_handlers = {}
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._semaphore: asyncio.Semaphore = asyncio.Semaphore(self._max_workers)
+        self._on_msg_handler_lock: asyncio.Lock = asyncio.Lock()
+        self._on_send_wait_lock: asyncio.Lock = asyncio.Lock()
+        self._log_path: Optional[str] = log_path
+        if log_path is not None:
+            self._logger: Logger = Logger(name = __name__, path = log_path)
+        self._sender: Optional[Sender] = None
+        self._on_msg_regex_handlers: dict[re.Pattern, tuple[Callable[..., Any], int]] = {}
+        self._local_send_wait_timeout: float = 3
     
     async def main(self):
         if self._reload:
             try:
-                HotReload.enable(self._logger)
+                HotReload.enable()
                 self._logger.info(f"热重载服务启动成功", tag="reload")
             except Exception as e:
                 self._logger.error(f"热重载服务启动失败", e, tag="reload")
@@ -62,8 +80,9 @@ class Plugin:
                     self._ws = websocket
                     self._logger.info(f"连接成功 {self._ws_url}", tag="connect")
                     await self.on_create(websocket)
-                    msg_task = asyncio.create_task(self.on_msg_handler(websocket))
-                    await self.ready(websocket)
+                    async with self._on_msg_handler_lock:
+                        asyncio.create_task(self.on_msg_handler(websocket))
+                    await self.ready()
                     while True:
                         await asyncio.sleep(1)
             except Exception as e:
@@ -87,85 +106,108 @@ class Plugin:
             return func
         return decorator
     
-    def get_sender(self):
+    def get_logger(self) -> Logger:
+        if not self._logger:
+            self._logger = Logger()
+        return self._logger
+
+    def get_local_send_wait_timeout(self) -> float:
+        return self._local_send_wait_timeout
+
+    def ser_local_send_wait_timeout(self, timeout: float) -> None:
+        self._local_send_wait_timeout = timeout
+
+    def get_sender(self) -> Sender:
         if not self._sender:
             self._sender = Sender(self)
         return self._sender
     
-    def running(self):
+    def running(self) -> bool:
         return self._running
     
-    def closed(self):
+    def closed(self) -> bool:
         return not self._running
     
-    async def ready(self, websocket):
+    async def ready(self):
         self._running = True
         resp = await self.send_ws_msg(Cmd.SyncOicq, {"pid": self._plugin_pid, "name": self._plugin_name, "token": self._plugin_token})
-        if resp and resp.get("data").get("status"):
+        if resp is not None and resp \
+            and resp.get("data", None) is not None and resp.get("data", {}) \
+            and resp.get("data", {}).get("status", False):
             self._logger.info(f"对接成功", tag="SyncOicq")
         else:
             self._logger.error(f"对接失败", tag="SyncOicq")
     
-    async def on_create(self, websocket):
+    async def on_create(self, websocket: WebSocketClientProtocol):
         pass
     
-    async def on_msg_error(self, message):
+    async def on_msg_error(self, message: str):
         pass
     
     async def close(self):
         if self._reload:
             HotReload.disable()
-        if self._allow_thread:
-            self.executor.shutdown(wait=False)
+        if self._allow_thread and self._executor is not None:
+            self._executor.shutdown(wait = False)
         for seq, future in list(self._pending_responses.items()):
             if not future.done():
                 future.cancel()
         self._pending_responses.clear()
+        for task in asyncio.all_tasks():
+            if task is not asyncio.current_task():
+                task.cancel()
         self._running = False
     
     async def on_close(self):
         pass
     
-    async def send_ws_msg(self, cmd, data, rsp=True, timeout: float = 10) -> dict | None:
+    async def send_ws_msg(self, cmd: Cmd | str, data: dict | Messenger, rsp: bool = True, timeout: float = 0) -> Optional[dict]:
         if not self._running:
-            return None
+            return
         
+        cmd_value = cmd.value if isinstance(cmd, Cmd) else cmd
+
         payload = {
-            "cmd": cmd,
+            "cmd": cmd_value,
             "rsp": rsp
         }
-        if data:
-            if isinstance(data, dict):
-                payload["data"] = data
-            elif isinstance(data, Messenger):
+        if data:   
+            if isinstance(data, Messenger):
                 payload["data"] = data.get_list()
+            else:
+                payload["data"] = data
         
         self._seq += 1
         seq = self._seq
         payload["seq"] = seq
         
+        if self._ws is None:
+            raise RuntimeError("WebSocket is not connected")
         await self._ws.send(json.dumps(payload))
         
         if rsp:
-            future = asyncio.get_event_loop().create_future()
-            self._pending_responses[seq] = future
-            
-            try:
-                response = await asyncio.wait_for(future, timeout=timeout)
-                return response
-            except asyncio.TimeoutError:
-                self._pending_responses.pop(seq, None)
-                raise TimeoutError(f"Response timeout for seq={seq}")
-            except asyncio.CancelledError:
-                self._pending_responses.pop(seq, None)
-                raise
-            finally:
-                self._pending_responses.pop(seq, None)
+            if not timeout:
+                timeout = self._local_send_wait_timeout
+            async with self._on_send_wait_lock:
+                future = asyncio.get_event_loop().create_future()
+                self._pending_responses[seq] = future
+                
+                try:
+                    response = await asyncio.wait_for(future, timeout = timeout)
+                    return response
+                except asyncio.TimeoutError:
+                    self._pending_responses.pop(seq, None)
+                    raise TimeoutError(f"Response timeout for seq={seq}")
+                except asyncio.CancelledError:
+                    self._pending_responses.pop(seq, None)
+                    raise
+                finally:
+                    self._pending_responses.pop(seq, None)
     
     async def on_unsupported_msg_handler(self, message: str):
         pass
     
-    async def on_msg_handler(self, websocket):
+    async def on_msg_handler(self, websocket: WebSocketClientProtocol):
         async for message in websocket:
             try:
                 msg = json.loads(message)
@@ -184,7 +226,7 @@ class Plugin:
                         await self.do_msg_handler(messenger)
     
     @staticmethod
-    def get_function_required_params_num(callback):
+    def get_function_required_params_num(callback: Callable[..., Any]) -> int:
         sig = inspect.signature(callback)
         if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in sig.parameters.values()):
             raise TypeError(f"Function({callback.__name__}) cannot use *args or **kwargs")
@@ -194,27 +236,28 @@ class Plugin:
             and param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
         )
     
-    async def on_resp_msg_handler(self, message):
+    async def on_resp_msg_handler(self, message: dict):
         seq = message.get("seq")
-        future = self._pending_responses.get(seq)
-        if future is None:
-            return
-        if not future.done():
-            future.set_result(message)
-        else:
-            self._logger.debug(f"Future for seq {seq} already done", tag="resp")
+        if seq is not None and seq in self._pending_responses:
+            future = self._pending_responses.get(seq)
+            if future is None:
+                return
+            if not future.done():
+                future.set_result(message)
+            else:
+                self._logger.debug(f"Future for seq {seq} already done", tag="resp")
     
-    async def do_msg_handler(self, messenger):
-        text = messenger.get(Msg.Text)
+    async def do_msg_handler(self, messenger: Messenger):
+        text = messenger.get_msg(Msg.Text)
         async with self._semaphore:
             for regex, (handler, rn) in self._on_msg_regex_handlers.items():
                 matches = re.fullmatch(regex, text)
                 if matches:
                     if asyncio.iscoroutinefunction(handler):
                         if rn == 1:
-                            asyncio.create_task(handler(messenger))
+                            task = asyncio.create_task(handler(messenger))
                         elif rn == 2:
-                            asyncio.create_task(handler(messenger, matches))
+                            task = asyncio.create_task(handler(messenger, matches))
                     else:
                         if not self._allow_thread:
                             raise RuntimeError("Sync function was not allowed (allow_thread=False)")
@@ -225,29 +268,33 @@ class Plugin:
                             await loop.run_in_executor(self._executor, handler, messenger, matches)
     
     def run(self,
-            url: str | None = None,
-            pid: str | None = None,
-            name: str | None = None,
-            token: str | None = None,
+            url: Optional[str] = None,
+            pid: Optional[str] = None,
+            name: Optional[str] = None,
+            token: Optional[str] = None,
             *,
-            max_workers: int | None = None,
-            allow_thread: bool | None = None,
-            reload: bool | None = None,
-            max_retry: int | None = None) -> None:
+            max_workers: Optional[int] = None,
+            allow_thread: Optional[bool] = None,
+            reload: Optional[bool] = None,
+            max_retry: Optional[int] = None,
+            log_path: Optional[str] = None
+    ) -> None:
         self._ws_url = url or self._ws_url
-        self._max_workers = max_workers if max_workers is not None else self._max_workers
-        self._allow_thread = allow_thread if allow_thread is not None else self._allow_thread
-        self._reload = reload if reload is not None else self._reload
-        self._max_retry = max_retry if max_retry is not None else self._max_retry
+        if max_workers is not None:
+            self._max_workers = max_workers
+            self._semaphore = asyncio.Semaphore(self._max_workers)
+        self._allow_thread = allow_thread or self._allow_thread
+        self._reload = reload or self._reload
+        self._max_retry = max_retry or self._max_retry
         
-        self._plugin_pid = pid
-        self._plugin_name = name
-        self._plugin_token = token
+        self._plugin_pid = pid or self._plugin_pid
+        self._plugin_name = name or self._plugin_name
+        self._plugin_token = token or self._plugin_token
         
-        self._logger = Logger()
         if self._allow_thread:
             self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
-        self._semaphore = asyncio.Semaphore(self._max_workers)
+        if log_path is not None or not hasattr(self, '_logger') or not self._logger:
+            self._logger = Logger(name = __name__, path = log_path or self._log_path or "app.log")
 
         try:
             asyncio.run(self.main())

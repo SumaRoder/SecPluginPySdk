@@ -1,5 +1,6 @@
+from enum import Enum
 
-class Cmd:
+class Cmd(str, Enum):
     SyncOicq = "SyncOicq"
     Response = "Response"
     Heartbeat = "Heartbeat"
