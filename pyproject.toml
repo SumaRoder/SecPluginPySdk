@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "secplugin"
 description = "WebSocket Plugin Demo for Secluded."
-version = "1.2.3"
+version = "1.2.4"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "SumaRoder", email = "1493813167@qq.com"},
@@ -15,7 +15,7 @@ authors = [
 keywords = ["websocket", "plugin", "secluded", "demo"]
 dependencies = [
     "websockets",
-    "colorlog",
+    "typing_extensions",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +23,7 @@ dev = [
     "pytest>=7",
     "black",
     "ruff",
+    "colorlog",
 ]
 
 [project.urls]

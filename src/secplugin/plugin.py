@@ -1,3 +1,4 @@
+from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 import asyncio
@@ -7,6 +8,7 @@ try:
 except ImportError:
     raise ImportError("Missing dependency 'websockets'. Please install it via 'pip install websockets'.")
 
+from websockets.exceptions import ConnectionClosedError
 if TYPE_CHECKING:
     try:
         # websockets>=10
@@ -62,7 +64,7 @@ class Plugin:
             self._logger: Logger = Logger(name = __name__, path = log_path)
         self._sender: Optional[Sender] = None
         self._on_msg_regex_handlers: dict[re.Pattern, tuple[Callable[..., Any], int]] = {}
-        self._local_send_wait_timeout: float = 3
+        self._local_send_wait_timeout: float = 15
     
     async def main(self):
         if self._reload:
@@ -79,10 +81,13 @@ class Plugin:
                     retry_cnt = 0
                     self._ws = websocket
                     self._logger.info(f"连接成功 {self._ws_url}", tag="connect")
-                    await self.on_create(websocket)
                     async with self._on_msg_handler_lock:
-                        asyncio.create_task(self.on_msg_handler(websocket))
+                        try:
+                            asyncio.create_task(self.on_msg_handler(websocket))
+                        except RuntimeError as e:
+                            raise e
                     await self.ready()
+                    await self.on_create(websocket)
                     while True:
                         await asyncio.sleep(1)
             except Exception as e:
@@ -114,7 +119,7 @@ class Plugin:
     def get_local_send_wait_timeout(self) -> float:
         return self._local_send_wait_timeout
 
-    def ser_local_send_wait_timeout(self, timeout: float) -> None:
+    def set_local_send_wait_timeout(self, timeout: float) -> None:
         self._local_send_wait_timeout = timeout
 
     def get_sender(self) -> Sender:
@@ -208,22 +213,24 @@ class Plugin:
         pass
     
     async def on_msg_handler(self, websocket: WebSocketClientProtocol):
-        async for message in websocket:
-            try:
-                msg = json.loads(message)
-            except json.JSONDecodeError:
-                msg = None
-                await self.on_msg_error(message)
-                await self.on_unsupported_msg_handler(message)
-            if msg:
-                cmd = msg.get("cmd", None)
-                messenger = Messenger(msg.get("data", []))
-                self._logger.debug(message, tag="onMsg")
-                match cmd:
-                    case Cmd.Response:
+        try:
+            async for message in websocket:
+                try:
+                    msg = json.loads(message)
+                except json.JSONDecodeError:
+                    msg = None
+                    await self.on_msg_error(message)
+                    await self.on_unsupported_msg_handler(message)
+                if msg:
+                    cmd = msg.get("cmd", None)
+                    messenger = Messenger(msg.get("data", []))
+                    self._logger.debug(message, tag="onMsg")
+                    if cmd == Cmd.Response:
                         await self.on_resp_msg_handler(msg)
-                    case Cmd.PushOicqMsg:
+                    elif cmd == Cmd.PushOicqMsg:
                         await self.do_msg_handler(messenger)
+        except ConnectionClosedError as e:
+            raise RuntimeError("WebSocket connection closed") from e
     
     @staticmethod
     def get_function_required_params_num(callback: Callable[..., Any]) -> int:

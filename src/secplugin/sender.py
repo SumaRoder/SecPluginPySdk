@@ -7,9 +7,7 @@ from typing_extensions import Protocol
 from .msg import Msg
 from .cmd import Cmd
 from .logger import Logger
-
-if TYPE_CHECKING:
-    from .messenger import Messenger
+from .messenger import Messenger
 
 class AbstractSender(Protocol):
     def running(self) -> bool:

@@ -7,9 +7,6 @@ from queue import Queue
 import importlib
 import types
 
-if TYPE_CHECKING:
-    import colorlog  # type: ignore
-
 try:
     colorlog: Optional[types.ModuleType] = importlib.import_module("colorlog")
 except Exception:
