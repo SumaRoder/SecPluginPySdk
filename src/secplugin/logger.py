@@ -1,7 +1,7 @@
 import json
 import logging
 import traceback
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, Self, TYPE_CHECKING
 from logging.handlers import QueueHandler, QueueListener
 from queue import Queue
 import importlib
@@ -40,23 +40,55 @@ def _create_file_handler(path: str) -> logging.FileHandler:
          datefmt='%Y-%m-%d %H:%M:%S'))
      return handler
 
-class Logger:
-    _listener: Optional[QueueListener] = None
+import threading
+import weakref
 
-    def __init__(self, name: str = __name__, path: str = "app.log") -> None:
-        self.log_queue = Queue()
+class Logger:
+    _lock = threading.Lock()
+    _listener: Optional[QueueListener] = None
+    _queue: Optional[Queue] = None
+    _instances: weakref.WeakValueDictionary[str, "Logger"] = weakref.WeakValueDictionary()
+    
+    def __new__(cls, name: str = __name__, path: str = "app.log"):
+        with cls._lock:
+            if name in cls._instances:
+                return cls._instances[name]
+            instance = super().__new__(cls)
+            cls._instances[name] = instance
+            return instance
+    
+    def __init__(self, name: str = __name__, path: str = "app.log"):
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+        
+        with Logger._lock:
+            if Logger._queue is None:
+                Logger._queue = Queue()
+                Logger._listener = QueueListener(
+                    Logger._queue, 
+                    _console_handler, 
+                    _create_file_handler(path)
+                )
+                Logger._listener.start()
+        
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.DEBUG)
-
-        if Logger._listener is None:
-            Logger._listener = QueueListener(
-                self.log_queue, _console_handler, _create_file_handler(path))
-            Logger._listener.start()
-        self.logger.addHandler(QueueHandler(self.log_queue))
-
+        self.logger.addHandler(QueueHandler(Logger._queue))
+    
+    @classmethod
+    def shutdown(cls):
+        if cls._listener:
+            cls._listener.stop()
+            cls._listener = None
+    
     @staticmethod
     def _format_exception(e: Exception) -> str:
         return ''.join(traceback.format_exception(type(e), e, e.__traceback__)).strip()
+    
+    @staticmethod
+    def get_logger(name: str) -> Self:
+        pass
 
     def log(self, *msg, level=logging.INFO, main_tag="SecPlugin", tag=None, end=" "):
         if tag is None:

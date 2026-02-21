@@ -31,7 +31,7 @@ from .sender import Sender
 class Plugin:
     def __init__(self,
                  url: str = "ws://127.0.0.1:24804",
-                 pid: str = "com.sumaroder.plugin",
+                 pid: str = "io.github.sumaroder.secplugin",
                  name: str = "SecPlugin",
                  token: str = "SecretToken",
                  *,
@@ -64,13 +64,17 @@ class Plugin:
             self._logger: Logger = Logger(name = __name__, path = log_path)
         self._sender: Optional[Sender] = None
         self._on_msg_regex_handlers: dict[re.Pattern, tuple[Callable[..., Any], int]] = {}
+        self._on_all_msg_handlers: list[tuple[Callable[..., Any], int]] = []
         self._local_send_wait_timeout: float = 15
     
     async def main(self):
         if self._reload:
             try:
-                HotReload.enable()
-                self._logger.info(f"热重载服务启动成功", tag="reload")
+                if HotReload.enable():
+                    self._logger.info(f"热重载服务启动成功", tag="reload")
+                else:
+                    self._logger.warning(f"热重载服务不可用", tag="reload")
+                    self._logger.warning(f"Missing optional dependency 'watchdog'(for function 'HotReload'). Please install it via 'pip install watchdog'.", tag="reload")
             except Exception as e:
                 self._logger.error(f"热重载服务启动失败", e, tag="reload")
         self._logger.debug(f"开始连接 {self._ws_url}", tag="connect")
@@ -99,15 +103,19 @@ class Plugin:
                 await self.close()
                 await self.on_close()
     
-    def on_msg(self, regex):
-        compiled_pattern = re.compile(regex)
-        if compiled_pattern in self._on_msg_regex_handlers:
-            raise AttributeError("Repeat regex")
+    def on_msg(self, regex=None):
+        if regex:
+            compiled_pattern = re.compile(regex)
+            if compiled_pattern in self._on_msg_regex_handlers:
+                raise AttributeError("Repeat regex")
         def decorator(func):
             if not asyncio.iscoroutinefunction(func) and not self._allow_thread:
                 raise TypeError("Function must be async, or set `allow_thread` to `True`")
             rn = Plugin.get_function_required_params_num(func)
-            self._on_msg_regex_handlers[compiled_pattern] = (func, rn)
+            if regex:
+                self._on_msg_regex_handlers[compiled_pattern] = (func, rn)
+            else:
+                self._on_all_msg_handlers.append((func, rn))
             return func
         return decorator
     
@@ -152,8 +160,10 @@ class Plugin:
     async def close(self):
         if self._reload:
             HotReload.disable()
+        if self._logger:
+            self._logger.shutdown()
         if self._allow_thread and self._executor is not None:
-            self._executor.shutdown(wait = False)
+            self._executor.shutdown(wait=self._running)
         for seq, future in list(self._pending_responses.items()):
             if not future.done():
                 future.cancel()
@@ -257,21 +267,40 @@ class Plugin:
     async def do_msg_handler(self, messenger: Messenger):
         text = messenger.get_msg(Msg.Text)
         async with self._semaphore:
+            for (handler, rn) in self._on_all_msg_handlers:
+                if asyncio.iscoroutinefunction(handler):
+                    if rn == 0:
+                        task = asyncio.create_task(handler())
+                    elif rn >= 1:
+                        task = asyncio.create_task(handler(messenger))
+                else:
+                    if not self._allow_thread:
+                        raise RuntimeError("Sync function was not allowed (allow_thread=False)")
+                    loop = asyncio.get_running_loop()
+                    if rn == 0:
+                        await loop.run_in_executor(self._executor, handler)
+                    elif rn >= 1:
+                        await loop.run_in_executor(self._executor, handler, messenger)
+            
             for regex, (handler, rn) in self._on_msg_regex_handlers.items():
                 matches = re.fullmatch(regex, text)
                 if matches:
                     if asyncio.iscoroutinefunction(handler):
-                        if rn == 1:
+                        if rn == 0:
+                            task = asyncio.create_task(handler())
+                        elif rn == 1:
                             task = asyncio.create_task(handler(messenger))
-                        elif rn == 2:
+                        elif rn >= 2:
                             task = asyncio.create_task(handler(messenger, matches))
                     else:
                         if not self._allow_thread:
                             raise RuntimeError("Sync function was not allowed (allow_thread=False)")
                         loop = asyncio.get_running_loop()
-                        if rn == 1:
+                        if rn == 0:
+                            await loop.run_in_executor(self._executor, handler)
+                        elif rn == 1:
                             await loop.run_in_executor(self._executor, handler, messenger)
-                        elif rn == 2:
+                        elif rn >= 2:
                             await loop.run_in_executor(self._executor, handler, messenger, matches)
     
     def run(self,
@@ -301,7 +330,7 @@ class Plugin:
         if self._allow_thread:
             self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
         if log_path is not None or not hasattr(self, '_logger') or not self._logger:
-            self._logger = Logger(name = __name__, path = log_path or self._log_path or "app.log")
+            self._logger = Logger(name = f"plugin_logger_{pid.replace('.', '_')}", path = log_path or self._log_path or "app.log")
 
         try:
             asyncio.run(self.main())
