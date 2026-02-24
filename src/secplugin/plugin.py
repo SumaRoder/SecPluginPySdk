@@ -70,13 +70,11 @@ class Plugin:
     async def main(self):
         if self._reload:
             try:
-                if HotReload.enable():
-                    self._logger.info(f"热重载服务启动成功", tag="reload")
-                else:
-                    self._logger.warning(f"热重载服务不可用", tag="reload")
-                    self._logger.warning(f"Missing optional dependency 'watchdog'(for function 'HotReload'). Please install it via 'pip install watchdog'.", tag="reload")
+                HotReload.enable()
+                self._logger.info(f"热重载服务启动成功", tag="reload")
             except Exception as e:
                 self._logger.error(f"热重载服务启动失败", e, tag="reload")
+        
         self._logger.debug(f"开始连接 {self._ws_url}", tag="connect")
         retry_cnt = 0
         while retry_cnt <= self._max_retry:
@@ -85,15 +83,24 @@ class Plugin:
                     retry_cnt = 0
                     self._ws = websocket
                     self._logger.info(f"连接成功 {self._ws_url}", tag="connect")
+                    
+                    msg_handler_task = asyncio.create_task(
+                        self.on_msg_handler(websocket)
+                    )
+                    
                     async with self._on_msg_handler_lock:
                         try:
-                            asyncio.create_task(self.on_msg_handler(websocket))
+                            await self.ready()
+                            await self.on_create(websocket)
                         except RuntimeError as e:
+                            msg_handler_task.cancel()
                             raise e
-                    await self.ready()
-                    await self.on_create(websocket)
-                    while True:
-                        await asyncio.sleep(1)
+                    
+                    try:
+                        await msg_handler_task
+                    except asyncio.CancelledError:
+                        pass
+            
             except Exception as e:
                 retry_cnt += 1
                 wait = min(2 ** retry_cnt + random.random(), 60)

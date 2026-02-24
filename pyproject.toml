@@ -5,14 +5,25 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "secplugin"
 description = "WebSocket Plugin Framework for Secluded."
-version = "1.2.5"
+version = "1.2.6"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "SumaRoder", email = "1493813167@qq.com"},
 ]
 keywords = ["websocket", "plugin", "secluded", "demo"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = [
     "websockets",
     "typing_extensions",
@@ -20,9 +31,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7",
-    "black",
-    "ruff",
     "colorlog",
     "watchdog",
 ]
@@ -34,7 +42,3 @@ Issues = "https://github.com/SumaRoder/SecPlugin/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = "test_*.py"

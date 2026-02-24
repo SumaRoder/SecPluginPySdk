@@ -1,5 +1,5 @@
 
-__version__ = "1.2.5"
+__version__ = "1.2.6"
 __all__ = ["Plugin", "Messenger", "Cmd", "Msg", "Sender"]
 
 from .plugin import Plugin
