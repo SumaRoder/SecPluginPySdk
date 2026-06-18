@@ -7,7 +7,7 @@ name = "secplugin"
 description = "WebSocket Plugin Framework for Secluded."
 version = "1.2.6"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "SumaRoder", email = "1493813167@qq.com"},
@@ -18,10 +18,10 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
@@ -36,9 +36,17 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/SumaRoder/SecPlugin"
-Repository = "https://github.com/SumaRoder/SecPlugin"
-Issues = "https://github.com/SumaRoder/SecPlugin/issues"
+Homepage = "https://github.com/SumaRoder/SecPluginPySdk"
+Repository = "https://github.com/SumaRoder/SecPluginPySdk"
+Issues = "https://github.com/SumaRoder/SecPluginPySdk/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "black>=25.11.0",
+    "pyright>=1.1.410",
+    "pytest>=8.4.2",
+]
+

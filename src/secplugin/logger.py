@@ -1,11 +1,13 @@
+import importlib
 import json
 import logging
-import traceback
-from typing import Optional, Self, TYPE_CHECKING
 from logging.handlers import QueueHandler, QueueListener
 from queue import Queue
-import importlib
+import traceback
+from typing import Optional, Self
 import types
+import threading
+import weakref
 
 try:
     colorlog: Optional[types.ModuleType] = importlib.import_module("colorlog")
@@ -39,9 +41,6 @@ def _create_file_handler(path: str) -> logging.FileHandler:
          '[%(asctime)s.%(msecs)03d] %(message)s',
          datefmt='%Y-%m-%d %H:%M:%S'))
      return handler
-
-import threading
-import weakref
 
 class Logger:
     _lock = threading.Lock()
@@ -86,9 +85,9 @@ class Logger:
     def _format_exception(e: Exception) -> str:
         return ''.join(traceback.format_exception(type(e), e, e.__traceback__)).strip()
     
-    @staticmethod
-    def get_logger(name: str) -> Self:
-        pass
+    @classmethod
+    def get_logger(cls, name: str = __name__, path: str = "app.log") -> Self:
+        return cls(name, path)
 
     def log(self, *msg, level=logging.INFO, main_tag="SecPlugin", tag=None, end=" "):
         if tag is None:

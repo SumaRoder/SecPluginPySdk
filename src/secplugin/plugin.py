@@ -3,30 +3,19 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import asyncio
 from typing import Any, Callable, Optional, TYPE_CHECKING
-try:
-    import websockets # type: ignore
-except ImportError:
-    raise ImportError("Missing dependency 'websockets'. Please install it via 'pip install websockets'.")
-
-from websockets.exceptions import ConnectionClosedError
-if TYPE_CHECKING:
-    try:
-        # websockets>=10
-        from websockets.legacy.client import WebSocketClientProtocol  # type: ignore
-    except Exception:
-        # older versions
-        from websockets.client import WebSocketClientProtocol  # type: ignore
-
+from typing_extensions import deprecated
+import websockets
 import re
 import inspect
 import random
-
 from .cmd import Cmd
 from .messenger import Messenger
 from .msg import Msg
 from .logger import Logger
 from .reload import HotReload
 from .sender import Sender
+if TYPE_CHECKING:
+    from websockets import ClientConnection  # type: ignore
 
 class Plugin:
     def __init__(self,
@@ -52,7 +41,7 @@ class Plugin:
         self._plugin_token: str = token
         
         self._running: bool = False
-        self._ws: Optional[WebSocketClientProtocol] = None
+        self._ws: Optional[ClientConnection] = None
         self._seq: int = 0
         self._pending_responses: dict[int, asyncio.Future] = {}
         self._executor: Optional[ThreadPoolExecutor] = None
@@ -71,15 +60,16 @@ class Plugin:
         if self._reload:
             try:
                 HotReload.enable()
-                self._logger.info(f"热重载服务启动成功", tag="reload")
+                self._logger.info("热重载服务启动成功", tag="reload")
             except Exception as e:
-                self._logger.error(f"热重载服务启动失败", e, tag="reload")
+                self._logger.error("热重载服务启动失败", e, tag="reload")
         
         self._logger.debug(f"开始连接 {self._ws_url}", tag="connect")
         retry_cnt = 0
         while retry_cnt <= self._max_retry:
+            self._ws = None
             try:
-                async with websockets.connect(self._ws_url) as websocket:
+                async with websockets.connect(self._ws_url, additional_headers={"Authorization": f"Bearer {self._plugin_token}"}) as websocket:
                     retry_cnt = 0
                     self._ws = websocket
                     self._logger.info(f"连接成功 {self._ws_url}", tag="connect")
@@ -99,31 +89,54 @@ class Plugin:
                     try:
                         await msg_handler_task
                     except asyncio.CancelledError:
-                        pass
+                        raise
             
-            except Exception as e:
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                await self.on_close()
+                await self.close()
+                raise
+            
+            except (websockets.exceptions.ConnectionClosedError, websockets.exceptions.ConnectionClosed,
+                    websockets.exceptions.InvalidMessage, websockets.exceptions.InvalidStatus,
+                    OSError, asyncio.TimeoutError) as e:
                 retry_cnt += 1
                 wait = min(2 ** retry_cnt + random.random(), 60)
                 self._logger.error(f"连接异常，{wait:.1f}s 后第 {retry_cnt} 次重连\n", e, tag="connect")
                 await asyncio.sleep(wait)
+            
+            except Exception as e:
+                self._logger.error("其他异常", e, tag="error")
+                raise
+            
             finally:
-                await self.close()
-                await self.on_close()
+                if self._ws:
+                    try:
+                        await self._ws.close()
+                    except Exception:
+                        pass
+                    self._ws = None
     
     def on_msg(self, regex=None):
         if regex:
             compiled_pattern = re.compile(regex)
             if compiled_pattern in self._on_msg_regex_handlers:
                 raise AttributeError("Repeat regex")
+            
+            def decorator(func):
+                if not asyncio.iscoroutinefunction(func) and not self._allow_thread:
+                    raise TypeError("Function must be async, or set `allow_thread` to `True`")
+                rn = Plugin.get_function_required_params_num(func)
+                self._on_msg_regex_handlers[compiled_pattern] = (func, rn)  # compiled_pattern 确定非 None
+                return func
+            return decorator
+        
         def decorator(func):
             if not asyncio.iscoroutinefunction(func) and not self._allow_thread:
                 raise TypeError("Function must be async, or set `allow_thread` to `True`")
             rn = Plugin.get_function_required_params_num(func)
-            if regex:
-                self._on_msg_regex_handlers[compiled_pattern] = (func, rn)
-            else:
-                self._on_all_msg_handlers.append((func, rn))
+            self._on_all_msg_handlers.append((func, rn))
             return func
+        
         return decorator
     
     def get_logger(self) -> Logger:
@@ -150,35 +163,54 @@ class Plugin:
     
     async def ready(self):
         self._running = True
+        # await self.authenticate()
+    
+    @deprecated(
+        "该鉴权方式已过时",
+        category=DeprecationWarning,
+    )
+    async def authenticate(self):
         resp = await self.send_ws_msg(Cmd.SyncOicq, {"pid": self._plugin_pid, "name": self._plugin_name, "token": self._plugin_token})
         if resp is not None and resp \
             and resp.get("data", None) is not None and resp.get("data", {}) \
             and resp.get("data", {}).get("status", False):
-            self._logger.info(f"对接成功", tag="SyncOicq")
+            self._logger.info("对接成功", tag="SyncOicq")
         else:
-            self._logger.error(f"对接失败", tag="SyncOicq")
+            self._logger.error("对接失败", tag="SyncOicq")
     
-    async def on_create(self, websocket: WebSocketClientProtocol):
+    async def on_create(self, websocket: ClientConnection):
         pass
     
     async def on_msg_error(self, message: str):
         pass
     
     async def close(self):
+        self._logger.error("正在关闭", tag="close")
+        self._running = False
+        
         if self._reload:
             HotReload.disable()
-        if self._logger:
-            self._logger.shutdown()
+        
         if self._allow_thread and self._executor is not None:
             self._executor.shutdown(wait=self._running)
+        
         for seq, future in list(self._pending_responses.items()):
             if not future.done():
                 future.cancel()
         self._pending_responses.clear()
-        for task in asyncio.all_tasks():
-            if task is not asyncio.current_task():
-                task.cancel()
-        self._running = False
+        
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except asyncio.CancelledError:
+                pass
+        
+        self._logger.info("已关闭", tag="close")
+        if self._logger:
+            self._logger.shutdown()
     
     async def on_close(self):
         pass
@@ -217,21 +249,27 @@ class Plugin:
                 try:
                     response = await asyncio.wait_for(future, timeout = timeout)
                     return response
-                except asyncio.TimeoutError:
+                except asyncio.TimeoutError as e:
                     self._pending_responses.pop(seq, None)
-                    raise TimeoutError(f"Response timeout for seq={seq}")
-                except asyncio.CancelledError:
+                    raise asyncio.TimeoutError(f"Response timeout for seq={seq}") from e
+                except asyncio.CancelledError as e:
                     self._pending_responses.pop(seq, None)
-                    raise
+                    raise asyncio.CancelledError(f"Response future for seq={seq} was cancelled") from e
                 finally:
                     self._pending_responses.pop(seq, None)
     
     async def on_unsupported_msg_handler(self, message: str):
         pass
     
-    async def on_msg_handler(self, websocket: WebSocketClientProtocol):
+    async def on_msg_handler(self, websocket: ClientConnection):
         try:
-            async for message in websocket:
+            async for raw_message in websocket:
+                message: str
+                if isinstance(raw_message, bytes):
+                    message = raw_message.decode("utf-8")
+                else:
+                    message = raw_message
+                
                 try:
                     msg = json.loads(message)
                 except json.JSONDecodeError:
@@ -246,7 +284,9 @@ class Plugin:
                         await self.on_resp_msg_handler(msg)
                     elif cmd == Cmd.PushOicqMsg:
                         await self.do_msg_handler(messenger)
-        except ConnectionClosedError as e:
+        except asyncio.CancelledError:
+            raise
+        except (websockets.exceptions.ConnectionClosedError, websockets.exceptions.ConnectionClosed) as e:
             raise RuntimeError("WebSocket connection closed") from e
     
     @staticmethod
@@ -277,9 +317,9 @@ class Plugin:
             for (handler, rn) in self._on_all_msg_handlers:
                 if asyncio.iscoroutinefunction(handler):
                     if rn == 0:
-                        task = asyncio.create_task(handler())
+                        asyncio.create_task(handler())
                     elif rn >= 1:
-                        task = asyncio.create_task(handler(messenger))
+                        asyncio.create_task(handler(messenger))
                 else:
                     if not self._allow_thread:
                         raise RuntimeError("Sync function was not allowed (allow_thread=False)")
@@ -294,11 +334,11 @@ class Plugin:
                 if matches:
                     if asyncio.iscoroutinefunction(handler):
                         if rn == 0:
-                            task = asyncio.create_task(handler())
+                            asyncio.create_task(handler())
                         elif rn == 1:
-                            task = asyncio.create_task(handler(messenger))
+                            asyncio.create_task(handler(messenger))
                         elif rn >= 2:
-                            task = asyncio.create_task(handler(messenger, matches))
+                            asyncio.create_task(handler(messenger, matches))
                     else:
                         if not self._allow_thread:
                             raise RuntimeError("Sync function was not allowed (allow_thread=False)")
@@ -337,11 +377,13 @@ class Plugin:
         if self._allow_thread:
             self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
         if log_path is not None or not hasattr(self, '_logger') or not self._logger:
-            self._logger = Logger(name = f"plugin_logger_{pid.replace('.', '_')}", path = log_path or self._log_path or "app.log")
+            self._logger = Logger(name = f"plugin_logger_{self._plugin_pid.replace('.', '_')}", path = log_path or self._log_path or "app.log")
 
         try:
             asyncio.run(self.main())
-        except KeyboardInterrupt:
-            self._logger.info("已关闭", tag="close")
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
         except Exception as e:
             self._logger.error("异常：", e, tag="error")
+        finally:
+            self._running = False

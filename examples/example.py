@@ -1,4 +1,4 @@
-from secplugin import *
+from secplugin import Plugin
 
 plugin = Plugin()
 sender = plugin.get_sender()

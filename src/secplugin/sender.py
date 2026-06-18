@@ -1,9 +1,5 @@
-import json
-import logging
-import re
-from typing import Any, List, Optional, Union, TYPE_CHECKING
+from typing import Any, Optional, Union
 from typing_extensions import Protocol
-
 from .msg import Msg
 from .cmd import Cmd
 from .logger import Logger
@@ -180,14 +176,14 @@ class Sender:
             self._logger.error(e, tag="send_reply_msg")
             return {}
 
-    async def send_card(self, messenger: Messenger, *json: tuple[str], in_one: bool = True) -> dict | list[dict]:
+    async def send_card(self, messenger: Messenger, *jsons: tuple[str], in_one: bool = True) -> dict | list[dict]:
         if not self.running():
             raise RuntimeError("Plugin has not running")
         try:
             reply = Messenger.get_base_messenger(messenger)
-            if len(json) > 1:
+            if len(jsons) > 1:
                 if in_one:
-                    for u in json:
+                    for u in jsons:
                         reply.add_msg(Msg.Json, u)
                     res = await self._sender.send_ws_msg(Cmd.SendOicqMsg, reply)
                     if res is None:
@@ -195,7 +191,7 @@ class Sender:
                     return res
                 else:
                     res = []
-                    for u in json:
+                    for u in jsons:
                         if reply.has_msg(Msg.Json):
                             reply.del_msg(Msg.Json)
                         reply.add_msg(Msg.Json, u)
@@ -204,8 +200,8 @@ class Sender:
                             result = {}
                         res.append(result)
                     return res
-            elif json:
-                reply.add_msg(Msg.Json, json[0])
+            elif jsons:
+                reply.add_msg(Msg.Json, jsons[0])
                 res = await self._sender.send_ws_msg(Cmd.SendOicqMsg, reply)
                 if res is None:
                     return {}

@@ -164,6 +164,10 @@ class Messenger:
                  .add_msg(Msg.ChannelId, messenger.get_msg(Msg.ChannelId))
         else:
             raise TypeError("该消息类型暂不支持处理")
+        
+        if messenger.get_msg(Msg.GolineMode) == "PO":
+            reply.add_msg(Msg.MsgId, messenger.get_msg(Msg.MsgId))
+        
         return reply
 
     @staticmethod
@@ -201,34 +205,6 @@ class Messenger:
         if not sender.running():
             raise RuntimeError("Plugin has not running")
         return await sender.send_ws_msg(cmd, self, rsp)
-    
-    def to_onebot_v11(self) -> str:
-        """
-        把当前 Messenger 对象转成 OneBot V11 的 message 字段（JSON 字符串）
-        返回示例: '[{"type":"text","data":{"text":"hello"}},{"type":"at","data":{"qq":"123456"}}]'
-        """
-        segments = []
-        for seg in self.list:               # seg 是 dict[str,str]
-            if Msg.Text in seg:
-                segments.append({"type": "text", "data": {"text": seg[Msg.Text]}})
-            elif Msg.AtUin in seg:
-                qq = seg[Msg.AtUin]
-                segments.append({"type": "at", "data": {"qq": qq}})
-            elif Msg.AtAll in seg:
-                segments.append({"type": "at", "data": {"qq": "all"}})
-            elif Msg.Img in seg:
-                # 这里只把 url/file 透传，cqhttp 会自动识别
-                segments.append({"type": "image", "data": {"file": seg[Msg.Url]}})
-            elif Msg.Reply in seg:
-                segments.append({"type": "reply", "data": {"id": seg[Msg.Reply]}})
-            elif Msg.Emoid in seg:
-                # 把表情 id 当 face 发送
-                segments.append({"type": "face", "data": {"id": seg[Msg.Emoid]}})
-            else:
-                # 其余一律当纯文本拼接
-                text = " ".join(f"{k}:{v}" for k, v in seg.items())
-                segments.append({"type": "text", "data": {"text": text}})
-        return json.dumps(segments, ensure_ascii=False)
     
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
         return False
