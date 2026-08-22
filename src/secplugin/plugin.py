@@ -17,6 +17,20 @@ from .sender import Sender
 if TYPE_CHECKING:
     from websockets import ClientConnection  # type: ignore
 
+from dataclasses import dataclass
+from enum import Enum, auto
+
+class ConcurrencyMode(Enum):
+    SYNC = auto()  # 同步执行，不并发
+    ASYNC = auto() # 异步并发，不限制
+    POOL = auto()  # 使用信号量限制并发数
+
+@dataclass
+class HandlerConfig:
+    mode: ConcurrencyMode = ConcurrencyMode.ASYNC
+    max_concurrent: int = 0  # 0 表示不限制  仅 POOL 模式有效
+    ordered: bool = False    # 是否保证该 handler 的顺序执行
+
 class Plugin:
     def __init__(self,
                  url: str = "ws://127.0.0.1:24804",
@@ -116,7 +130,17 @@ class Plugin:
                         pass
                     self._ws = None
     
-    def on_msg(self, regex=None):
+    def on_msg(self, regex=None, *,
+               mode: ConcurrencyMode = ConcurrencyMode.ASYNC,
+               max_concurrent: int = 0,
+               ordered: bool = False
+    ):
+        config = HandlerConfig(
+            mode=mode,
+            max_concurrent=max_concurrent,
+            ordered=ordered
+        )
+        
         if regex:
             compiled_pattern = re.compile(regex)
             if compiled_pattern in self._on_msg_regex_handlers:
@@ -126,7 +150,7 @@ class Plugin:
                 if not asyncio.iscoroutinefunction(func) and not self._allow_thread:
                     raise TypeError("Function must be async, or set `allow_thread` to `True`")
                 rn = Plugin.get_function_required_params_num(func)
-                self._on_msg_regex_handlers[compiled_pattern] = (func, rn)  # compiled_pattern 确定非 None
+                self._on_msg_regex_handlers[compiled_pattern] = (func, rn, config)
                 return func
             return decorator
         
@@ -134,7 +158,7 @@ class Plugin:
             if not asyncio.iscoroutinefunction(func) and not self._allow_thread:
                 raise TypeError("Function must be async, or set `allow_thread` to `True`")
             rn = Plugin.get_function_required_params_num(func)
-            self._on_all_msg_handlers.append((func, rn))
+            self._on_all_msg_handlers.append((func, rn, config))
             return func
         
         return decorator
@@ -313,42 +337,61 @@ class Plugin:
     
     async def do_msg_handler(self, messenger: Messenger):
         text = messenger.get_msg(Msg.Text)
+        
+        tasks: list[asyncio.Task] = []
+        
         async with self._semaphore:
-            for (handler, rn) in self._on_all_msg_handlers:
-                if asyncio.iscoroutinefunction(handler):
-                    if rn == 0:
-                        asyncio.create_task(handler())
-                    elif rn >= 1:
-                        asyncio.create_task(handler(messenger))
-                else:
-                    if not self._allow_thread:
-                        raise RuntimeError("Sync function was not allowed (allow_thread=False)")
-                    loop = asyncio.get_running_loop()
-                    if rn == 0:
-                        await loop.run_in_executor(self._executor, handler)
-                    elif rn >= 1:
-                        await loop.run_in_executor(self._executor, handler, messenger)
+            for (handler, rn, config) in self._on_all_msg_handlers:
+                task = self._dispatch_task(handler, rn, messenger, None)
+                if task:
+                    tasks.append(task)
             
-            for regex, (handler, rn) in self._on_msg_regex_handlers.items():
+            for regex, (handler, rn, config) in self._on_msg_regex_handlers.items():
                 matches = re.fullmatch(regex, text)
                 if matches:
-                    if asyncio.iscoroutinefunction(handler):
-                        if rn == 0:
-                            asyncio.create_task(handler())
-                        elif rn == 1:
-                            asyncio.create_task(handler(messenger))
-                        elif rn >= 2:
-                            asyncio.create_task(handler(messenger, matches))
-                    else:
-                        if not self._allow_thread:
-                            raise RuntimeError("Sync function was not allowed (allow_thread=False)")
-                        loop = asyncio.get_running_loop()
-                        if rn == 0:
-                            await loop.run_in_executor(self._executor, handler)
-                        elif rn == 1:
-                            await loop.run_in_executor(self._executor, handler, messenger)
-                        elif rn >= 2:
-                            await loop.run_in_executor(self._executor, handler, messenger, matches)
+                    task = self._dispatch_task(handler, rn, messenger, matches)
+                    if task:
+                        tasks.append(task)
+            
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        self._logger.error(f"Handler {tasks[i].get_name()} raised exception", result, tag="msg_handler")
+    
+    def _dispatch_task(self,
+                       handler: Callable[..., Any],
+                       rn: int,
+                       messenger: Messenger,
+                       matches: Optional[re.Match] = None
+    ) -> Optional[asyncio.Task]:
+        if asyncio.iscoroutinefunction(handler):
+            if rn == 0:
+                coro = handler()
+            elif rn == 1:
+                coro = handler(messenger)
+            else:
+                coro = handler(messenger, matches)
+            task = asyncio.get_running_loop().create_task(coro, name=handler.__name__)
+            return task
+        
+        else:
+            if not self._allow_thread:
+                raise RuntimeError("Sync function was not allowed (allow_thread=False)")
+            
+            loop = asyncio.get_running_loop()
+            
+            if rn == 0:
+                fn = lambda: handler()
+            elif rn == 1:
+                fn = lambda: handler(messenger)
+            else:
+                fn = lambda: handler(messenger, matches)
+            
+            future = loop.run_in_executor(self._executor, fn)
+            task = future.ensure_future(future)
+            task.set_name(handler.__name__)
+            return task
     
     def run(self,
             url: Optional[str] = None,
