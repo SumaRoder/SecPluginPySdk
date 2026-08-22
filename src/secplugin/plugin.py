@@ -3,7 +3,6 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import asyncio
 from typing import Any, Callable, Optional, TYPE_CHECKING
-from typing_extensions import deprecated
 import websockets
 import re
 import inspect
@@ -21,15 +20,15 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 class ConcurrencyMode(Enum):
-    SYNC = auto()  # 同步执行，不并发
-    ASYNC = auto() # 异步并发，不限制
-    POOL = auto()  # 使用信号量限制并发数
+    SYNC = auto()
+    ASYNC = auto()
+    POOL = auto()
 
 @dataclass
 class HandlerConfig:
     mode: ConcurrencyMode = ConcurrencyMode.ASYNC
-    max_concurrent: int = 0  # 0 表示不限制  仅 POOL 模式有效
-    ordered: bool = False    # 是否保证该 handler 的顺序执行
+    max_concurrent: int = 0
+    ordered: bool = False
 
 class Plugin:
     def __init__(self,
@@ -59,7 +58,11 @@ class Plugin:
         self._seq: int = 0
         self._pending_responses: dict[int, asyncio.Future] = {}
         self._executor: Optional[ThreadPoolExecutor] = None
-        self._semaphore: asyncio.Semaphore = asyncio.Semaphore(self._max_workers)
+        if self._allow_thread:
+            self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        self._handler_semaphores: dict[str, asyncio.Semaphore] = {}
+        self._ordered_queues: dict[str, asyncio.Queue] = {}
+        self._ordered_workers: dict[str, asyncio.Task] = {}
         self._on_msg_handler_lock: asyncio.Lock = asyncio.Lock()
         self._on_send_wait_lock: asyncio.Lock = asyncio.Lock()
         self._log_path: Optional[str] = log_path
@@ -187,20 +190,6 @@ class Plugin:
     
     async def ready(self):
         self._running = True
-        # await self.authenticate()
-    
-    @deprecated(
-        "该鉴权方式已过时",
-        category=DeprecationWarning,
-    )
-    async def authenticate(self):
-        resp = await self.send_ws_msg(Cmd.SyncOicq, {"pid": self._plugin_pid, "name": self._plugin_name, "token": self._plugin_token})
-        if resp is not None and resp \
-            and resp.get("data", None) is not None and resp.get("data", {}) \
-            and resp.get("data", {}).get("status", False):
-            self._logger.info("对接成功", tag="SyncOicq")
-        else:
-            self._logger.error("对接失败", tag="SyncOicq")
     
     async def on_create(self, websocket: ClientConnection):
         pass
@@ -208,7 +197,7 @@ class Plugin:
     async def on_msg_error(self, message: str):
         pass
     
-    async def close(self):
+    async def close(self, timeout: float=10.0):
         self._logger.error("正在关闭", tag="close")
         self._running = False
         
@@ -232,6 +221,13 @@ class Plugin:
             except asyncio.CancelledError:
                 pass
         
+        for handler_id, worker in list(self._handler_ordered_workers.items()):
+            if not worker.done():
+                worker.cancel()
+        self._handler_ordered_workers.clear()
+        self._handler_ordered_queues.clear()
+        self._handler_semaphores.clear()
+        
         self._logger.info("已关闭", tag="close")
         if self._logger:
             self._logger.shutdown()
@@ -239,30 +235,31 @@ class Plugin:
     async def on_close(self):
         pass
     
-    async def send_ws_msg(self, cmd: Cmd | str, data: dict | Messenger, rsp: bool = True, timeout: float = 0) -> Optional[dict]:
+    async def send_ws_msg(self,
+        cmd: Cmd | str,
+        data: Optional[dict | Messenger] = None,
+        rsp: bool = False,
+        timeout: Optional[float] = None
+    ) -> Optional[dict]:
         if not self._running:
             return
+        if self._ws is None:
+            raise RuntimeError("WebSocket is not connected")
         
         cmd_value = cmd.value if isinstance(cmd, Cmd) else cmd
-
-        payload = {
-            "cmd": cmd_value,
-            "rsp": rsp
-        }
-        if data:   
+        payload = { "cmd": cmd_value }
+        if data is not None:
             if isinstance(data, Messenger):
                 payload["data"] = data.get_list()
             else:
-                payload["data"] = data
+                payload["data"] = dict(data)
+        if rsp:
+            payload["rsp"] = True
+            self._seq += 1
+            seq = self._seq
+            payload["seq"] = seq
         
-        self._seq += 1
-        seq = self._seq
-        payload["seq"] = seq
-        
-        if self._ws is None:
-            raise RuntimeError("WebSocket is not connected")
-        await self._ws.send(json.dumps(payload))
-        
+        await self._ws.send(json.dumps(payload, ensure_ascii=False))
         if rsp:
             if not timeout:
                 timeout = self._local_send_wait_timeout
@@ -271,7 +268,7 @@ class Plugin:
                 self._pending_responses[seq] = future
                 
                 try:
-                    response = await asyncio.wait_for(future, timeout = timeout)
+                    response = await asyncio.wait_for(future, timeout=timeout)
                     return response
                 except asyncio.TimeoutError as e:
                     self._pending_responses.pop(seq, None)
@@ -308,6 +305,8 @@ class Plugin:
                         await self.on_resp_msg_handler(msg)
                     elif cmd == Cmd.PushOicqMsg:
                         await self.do_msg_handler(messenger)
+                    elif cmd == Cmd.Heartbeat:
+                        await self.on_heartbeat_msg_handler()
         except asyncio.CancelledError:
             raise
         except (websockets.exceptions.ConnectionClosedError, websockets.exceptions.ConnectionClosed) as e:
@@ -339,32 +338,32 @@ class Plugin:
         text = messenger.get_msg(Msg.Text)
         
         tasks: list[asyncio.Task] = []
-        
-        async with self._semaphore:
-            for (handler, rn, config) in self._on_all_msg_handlers:
-                task = self._dispatch_task(handler, rn, messenger, None)
-                if task:
+        for (handler, rn, config) in self._on_all_msg_handlers:
+            task = await self._dispatch_task(handler, rn, messenger, None, config)
+            if task is not None:
+                tasks.append(task)
+        for regex, (handler, rn, config) in self._on_msg_regex_handlers.items():
+            matches = re.fullmatch(regex, text)
+            if matches:
+                task = await self._dispatch_task(handler, rn, messenger, matches, config)
+                if task is not None:
                     tasks.append(task)
-            
-            for regex, (handler, rn, config) in self._on_msg_regex_handlers.items():
-                matches = re.fullmatch(regex, text)
-                if matches:
-                    task = self._dispatch_task(handler, rn, messenger, matches)
-                    if task:
-                        tasks.append(task)
-            
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        self._logger.error(f"Handler {tasks[i].get_name()} raised exception", result, tag="msg_handler")
+        
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    self._logger.error(f"Handler {tasks[i].get_name()} raised exception", result, tag="msg_handler")
     
-    def _dispatch_task(self,
-                       handler: Callable[..., Any],
-                       rn: int,
-                       messenger: Messenger,
-                       matches: Optional[re.Match] = None
+    async def _dispatch_task(self,
+        handler: Callable[..., Any],
+        rn: int,
+        messenger: Messenger,
+        matches: Optional[re.Match] = None,
+        config: Optional[HandlerConfig] = None
     ) -> Optional[asyncio.Task]:
+        config = config or HandlerConfig()
+        
         if asyncio.iscoroutinefunction(handler):
             if rn == 0:
                 coro = handler()
@@ -372,26 +371,95 @@ class Plugin:
                 coro = handler(messenger)
             else:
                 coro = handler(messenger, matches)
-            task = asyncio.get_running_loop().create_task(coro, name=handler.__name__)
-            return task
-        
         else:
             if not self._allow_thread:
                 raise RuntimeError("Sync function was not allowed (allow_thread=False)")
-            
-            loop = asyncio.get_running_loop()
-            
             if rn == 0:
                 fn = lambda: handler()
             elif rn == 1:
                 fn = lambda: handler(messenger)
             else:
                 fn = lambda: handler(messenger, matches)
-            
-            future = loop.run_in_executor(self._executor, fn)
-            task = future.ensure_future(future)
-            task.set_name(handler.__name__)
-            return task
+        
+        handler_id = id(handler)
+        if config.ordered:
+            if handler_id not in self._handler_ordered_workers or self._handler_ordered_workers[handler_id].done():
+                self._handler_ordered_queues[handler_id] = asyncio.Queue()
+                self._handler_ordered_workers[handler_id] = asyncio.create_task(
+                    self._ordered_worker(handler_id, handler, config),
+                    name=f"ordered_worker_{handler.__name__}"
+                )
+            future = asyncio.get_event_loop().create_future()
+            await self._handler_ordered_queues[handler_id].put(
+                (
+                    coro if asyncio.iscoroutinefunction(handler) else fn,
+                    future,
+                    asyncio.iscoroutinefunction(handler)
+                )
+            )
+            async def _wait_ordered():
+                return await future
+            return asyncio.create_task(_wait_ordered(), name=f"ordered_{handler.__name__}")
+        if config.mode == ConcurrencyMode.POOL and config.max_concurrent > 0:
+            sema = self._handler_semaphores.get(handler_id, None)
+            if sema is None:
+                sema = asyncio.Semaphore(config.max_concurrent)
+                self._handler_semaphores[handler_id] = sema
+            async def _pooled():
+                async with sema:
+                    if asyncio.iscoroutinefunction(handler):
+                        return await coro
+                    else:
+                        loop = asyncio.get_running_loop()
+                        return await loop.run_in_executor(self._executor, fn)
+            return asyncio.create_task(_pooled(), name=f"pooled_{handler.__name__}")
+        if config.mode == ConcurrencyMode.SYNC:
+            if asyncio.iscoroutinefunction(handler):
+                return await coro
+            else:
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(self._executor, fn)
+            return None
+        loop = asyncio.get_running_loop()
+        if asyncio.iscoroutinefunction(handler):
+            return loop.create_task(coro, name=handler.__name__)
+        else:
+            return loop.run_in_executor(self._executor, fn) # type: ignore
+    
+    async def _ordered_worker(self,
+        handler_id: int,
+        handler: Callable[..., Any],
+        config: HandlerConfig
+    ):
+        queue = self._handler_ordered_queues[handler_id]
+        while True:
+            try:
+                item, future, is_coro = await queue.get()
+                try:
+                    if is_coro:
+                        result = await item
+                    else:
+                        loop = asyncio.get_running_loop()
+                        result = await loop.run_in_executor(self._executor, item)
+                    if not future.done():
+                        future.set_result(result)
+                except Exception as e:
+                    if not future.done():
+                        future.set_exception(e)
+                finally:
+                    queue.task_done()
+            except asyncio.CancelledError:
+                while not queue.empty():
+                    try:
+                        _, fut, _ = queue.get_nowait()
+                        if not fut.done():
+                            fut.cancel()
+                    except asyncio.QueueEmpty:
+                        break
+                raise
+    
+    async def on_heartbeat_msg_handler(self):
+        await self.send_ws_msg(Cmd.Heartbeat)
     
     def run(self,
             url: Optional[str] = None,
@@ -417,7 +485,7 @@ class Plugin:
         self._plugin_name = name or self._plugin_name
         self._plugin_token = token or self._plugin_token
         
-        if self._allow_thread:
+        if self._allow_thread and self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
         if log_path is not None or not hasattr(self, '_logger') or not self._logger:
             self._logger = Logger(name = f"plugin_logger_{self._plugin_pid.replace('.', '_')}", path = log_path or self._log_path or "app.log")
